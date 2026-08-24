@@ -22,6 +22,27 @@ supabase link --project-ref <your-project-ref>
 supabase db push
 ```
 
+## Intersection dataset
+
+The intersection typeahead on `/report` searches a pre-processed static asset,
+`public/data/toronto-intersections.json`, rather than calling a geocoding API.
+
+**Attribution:** Contains information licensed under the
+[Open Government Licence – Toronto](https://open.toronto.ca/open-data-licence/).
+Source: [Intersection File - City of Toronto](https://open.toronto.ca/dataset/intersection-file-city-of-toronto/).
+
+The raw source GeoJSON (~33.9 MB) lives in `datasets/` and is **gitignored** —
+it is never committed. To regenerate the processed asset, download
+`Centreline Intersection - 4326.geojson` into `datasets/` and run:
+
+```bash
+node scripts/build-intersections.mjs
+```
+
+The script filters ~46k raw nodes down to real street-level intersections and
+writes a compact JSON file of `{ label, streets, lat, lng }` entries. It is a
+one-time/manual step and is not part of `npm run build`.
+
 ## Getting Started
 
 First, run the development server:

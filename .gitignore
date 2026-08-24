@@ -24,6 +24,11 @@
 .DS_Store
 *.pem
 
+# raw open-data source files (large; processed output in public/data is committed)
+# regenerate public/data/toronto-intersections.json via:
+#   node scripts/build-intersections.mjs
+/datasets
+
 # debug
 npm-debug.log*
 yarn-debug.log*
