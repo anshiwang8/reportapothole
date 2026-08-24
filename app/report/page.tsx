@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import Link from "next/link";
+import LocationPicker, { type Coordinates } from "./location-picker";
 
 const SEVERITY_OPTIONS = ["low", "medium", "high"] as const;
 
@@ -15,8 +17,7 @@ interface ReportResponse {
 }
 
 export default function ReportPage() {
-  const [latitude, setLatitude] = useState("");
-  const [longitude, setLongitude] = useState("");
+  const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -25,6 +26,9 @@ export default function ReportPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!coordinates) {
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
     setResult(null);
@@ -34,8 +38,8 @@ export default function ReportPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          latitude: Number(latitude),
-          longitude: Number(longitude),
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude,
           description: description === "" ? undefined : description,
           severity: severity === "" ? undefined : severity,
         }),
@@ -60,28 +64,7 @@ export default function ReportPage() {
     <main className="flex flex-1 flex-col items-center gap-4 p-8">
       <h1 className="text-2xl font-bold">Report a Pothole</h1>
       <form onSubmit={handleSubmit} className="flex w-full max-w-sm flex-col gap-3">
-        <label className="flex flex-col gap-1">
-          Latitude
-          <input
-            type="number"
-            step="any"
-            required
-            value={latitude}
-            onChange={(event) => setLatitude(event.target.value)}
-            className="border p-2"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          Longitude
-          <input
-            type="number"
-            step="any"
-            required
-            value={longitude}
-            onChange={(event) => setLongitude(event.target.value)}
-            className="border p-2"
-          />
-        </label>
+        <LocationPicker coordinates={coordinates} onChange={setCoordinates} />
         <label className="flex flex-col gap-1">
           Description
           <textarea
@@ -106,13 +89,17 @@ export default function ReportPage() {
             ))}
           </select>
         </label>
-        <button type="submit" disabled={isSubmitting} className="border p-2">
+        <button type="submit" disabled={isSubmitting || !coordinates} className="border p-2">
           {isSubmitting ? "Submitting..." : "Submit report"}
         </button>
       </form>
       {result && (
         <p>
           Report submitted. Public ID: <strong>{result.public_id}</strong>
+          {" — "}
+          <Link href={`/report/${result.public_id}`} className="underline">
+            View your report
+          </Link>
         </p>
       )}
       {error && <p className="text-red-600">{error}</p>}
