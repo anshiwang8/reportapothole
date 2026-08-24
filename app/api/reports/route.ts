@@ -51,6 +51,92 @@ async function photoExistsAtPath(supabase: SupabaseClient, path: string): Promis
   return (data ?? []).some((file) => file.name === filename);
 }
 
+// Placeholder distance threshold for the invisible duplicate check below,
+// untuned -- same spirit as MAX_REQUESTS_PER_WINDOW in lib/rate-limit.ts.
+// Revisit once real submission density/GPS accuracy patterns are known.
+const DUPLICATE_RADIUS_METERS = 25;
+
+const EARTH_RADIUS_METERS = 6_371_000;
+const METERS_PER_DEGREE_LATITUDE = 111_320;
+
+function toRadians(degrees: number): number {
+  return (degrees * Math.PI) / 180;
+}
+
+function haversineDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_METERS * c;
+}
+
+interface DuplicateCandidate {
+  id: string;
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * Finds an existing, unresolved, non-duplicate report within
+ * DUPLICATE_RADIUS_METERS of the given coordinates, if any. A small
+ * bounding-box pre-filter on the indexed latitude/longitude columns
+ * (reports_lat_lng_idx, supabase/migrations/0001_init.sql) keeps the
+ * candidate set small; precise Haversine distance is then computed in
+ * application code against just that set. No PostGIS.
+ *
+ * `duplicate_of IS NULL` ensures this only ever matches against genuine
+ * reports -- a report that is itself flagged as a duplicate can never be
+ * chosen as the "original" for a later submission.
+ *
+ * Best-effort only, like the rate-limit check in lib/rate-limit.ts: on a
+ * query error, fails open (treats it as no match) so an infra hiccup here
+ * never blocks a legitimate submission, and two reports submitted for the
+ * same real pothole at nearly the same instant may both miss each other --
+ * an accepted tradeoff, not a hard concurrency guarantee.
+ */
+async function findDuplicateReportId(
+  supabase: ReturnType<typeof createServerClient>,
+  latitude: number,
+  longitude: number
+): Promise<string | null> {
+  const latDelta = DUPLICATE_RADIUS_METERS / METERS_PER_DEGREE_LATITUDE;
+  const metersPerDegreeLongitude =
+    METERS_PER_DEGREE_LATITUDE * Math.cos(toRadians(latitude));
+  const lonDelta = DUPLICATE_RADIUS_METERS / metersPerDegreeLongitude;
+
+  const { data, error } = await supabase
+    .from("reports")
+    .select("id, latitude, longitude")
+    .neq("status", "resolved")
+    .is("duplicate_of", null)
+    .gte("latitude", latitude - latDelta)
+    .lte("latitude", latitude + latDelta)
+    .gte("longitude", longitude - lonDelta)
+    .lte("longitude", longitude + lonDelta);
+
+  if (error) {
+    console.error("Duplicate check query failed; treating as no match:", error);
+    return null;
+  }
+
+  const candidates = (data ?? []) as DuplicateCandidate[];
+  const match = candidates.find(
+    (candidate) =>
+      haversineDistanceMeters(latitude, longitude, candidate.latitude, candidate.longitude) <=
+      DUPLICATE_RADIUS_METERS
+  );
+
+  return match?.id ?? null;
+}
+
 const DESCRIPTION_MAX_LENGTH = 1000;
 
 const PUBLIC_ID_ALPHABET =
@@ -155,6 +241,7 @@ interface ReportInsert {
   municipality: string | null;
   province: string | null;
   photo_url: string | null;
+  duplicate_of: string | null;
 }
 
 interface ReportRow {
@@ -317,6 +404,7 @@ export async function POST(request: Request) {
 
   try {
     const geocode = await reverseGeocode(latitude, longitude);
+    const duplicateOfId = await findDuplicateReportId(supabase, latitude, longitude);
 
     const { data, error } = await insertReportWithRetry(supabase, {
       latitude,
@@ -327,6 +415,7 @@ export async function POST(request: Request) {
       municipality: geocode.municipality,
       province: geocode.province,
       photo_url: normalizedPhotoUrl,
+      duplicate_of: duplicateOfId,
     });
 
     if (error || !data) {

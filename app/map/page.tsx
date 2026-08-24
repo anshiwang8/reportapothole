@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { createServerReadClient } from "@/lib/supabase/server-read";
 import AllReportsMap, { type MapReport } from "./all-reports-map";
 
@@ -15,6 +16,10 @@ export default async function MapPage() {
   const { data, error } = await supabase
     .from("reports")
     .select("public_id, latitude, longitude, status")
+    // Reports flagged as duplicates (supabase/migrations/0004_duplicate_detection.sql)
+    // are excluded from the public map -- their own /report/[publicId]
+    // permalink is unaffected, only this listing.
+    .is("duplicate_of", null)
     .order("created_at", { ascending: false })
     .limit(REPORT_LIMIT);
 
@@ -28,11 +33,21 @@ export default async function MapPage() {
   const reports = (data ?? []) as MapReport[];
 
   return (
-    <main className="flex flex-1 flex-col items-center gap-4 p-8">
-      <h1 className="text-2xl font-bold">Pothole map</h1>
-      <div className="w-full max-w-3xl">
-        <AllReportsMap reports={reports} />
-      </div>
-    </main>
+    <>
+      {/* Mirrors the "Potholes" link's placement/styling in
+          app/report/layout.tsx, so the two read as a matched pair -- /report
+          links out to /map, and /map links back to /report. */}
+      <header className="flex justify-end p-4">
+        <Link href="/report" className="border p-2">
+          Report a pothole
+        </Link>
+      </header>
+      <main className="flex flex-1 flex-col items-center gap-4 p-8">
+        <h1 className="text-2xl font-bold">Pothole map</h1>
+        <div className="w-full max-w-3xl">
+          <AllReportsMap reports={reports} />
+        </div>
+      </main>
+    </>
   );
 }
