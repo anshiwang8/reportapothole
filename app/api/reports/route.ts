@@ -1,5 +1,7 @@
-import { randomInt, createHash } from "node:crypto";
+import { randomInt } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServerClient } from "@/lib/supabase/server";
+import { getClientIp, hashIp, isRateLimited, recordRateLimitEvent } from "@/lib/rate-limit";
 
 const ALLOWED_SEVERITIES = ["low", "medium", "high"] as const;
 type Severity = (typeof ALLOWED_SEVERITIES)[number];
@@ -20,83 +22,33 @@ const CANADA_BBOX = {
   lngMax: -52,
 };
 
-// Placeholder values, not derived from any real-usage analysis -- tune once
-// actual traffic patterns are known.
-const MAX_REPORTS_PER_WINDOW = 5;
-const WINDOW_MINUTES = 10;
-
-// Dev-only fallback when x-forwarded-for is absent, e.g. local `next dev`,
-// which isn't behind a proxy that sets it. Every unidentified local request
-// shares one rate-limit bucket -- fine for local development, never expected
-// in production behind Vercel's edge network (which sets x-forwarded-for on
-// every request). NextRequest's old `.ip`/`.geo` properties were removed in
-// Next.js 15, so reading this header directly is the current approach.
-const DEV_FALLBACK_IP = "unknown-dev-ip";
+const PHOTO_BUCKET = "report-photos";
 
 /**
- * x-forwarded-for can carry a comma-separated proxy chain
- * ("client, proxy1, proxy2"); the first entry is the original client.
- */
-function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (!forwardedFor) {
-    return DEV_FALLBACK_IP;
-  }
-  const firstIp = forwardedFor.split(",")[0]?.trim();
-  return firstIp || DEV_FALLBACK_IP;
-}
-
-// Raw IPs are never stored, only their hash, per the project's principle of
-// not retaining unnecessary personal data (see supabase/migrations/0002_rate_limiting.sql).
-function hashIp(ip: string): string {
-  return createHash("sha256").update(ip).digest("hex");
-}
-
-/**
- * Checks whether this IP has already hit the rate limit within the current
- * window. Known tradeoff, not solved here: IP-based limiting affects an
- * entire shared office/NAT network as a single bucket, so a burst of
- * legitimate requests from different people behind the same public IP can
- * trip this.
+ * Confirms an object actually exists at this exact path in the photo
+ * bucket, using the secret client. A client-supplied path must never be
+ * trusted blindly -- without this check, photoPath would become an
+ * arbitrary user-controlled string persisted and rendered publicly.
  *
- * On a database error, fails open (allows the request) rather than closed,
- * consistent with how reverseGeocode below treats external/infra failures
- * as best-effort rather than hard blockers on report submission.
+ * Fails CLOSED (treats an error as "does not exist") unlike the rate-limit
+ * check above, which fails open -- this check is a security boundary
+ * against unverified user input, not a best-effort abuse-prevention signal.
  */
-async function isRateLimited(
-  supabase: ReturnType<typeof createServerClient>,
-  ipHash: string
-): Promise<boolean> {
-  const windowStart = new Date(Date.now() - WINDOW_MINUTES * 60_000).toISOString();
+async function photoExistsAtPath(supabase: SupabaseClient, path: string): Promise<boolean> {
+  const lastSlashIndex = path.lastIndexOf("/");
+  const folder = lastSlashIndex === -1 ? "" : path.slice(0, lastSlashIndex);
+  const filename = lastSlashIndex === -1 ? path : path.slice(lastSlashIndex + 1);
 
-  const { count, error } = await supabase
-    .from("rate_limit_events")
-    .select("id", { count: "exact", head: true })
-    .eq("ip_hash", ipHash)
-    .gte("created_at", windowStart);
+  const { data, error } = await supabase.storage
+    .from(PHOTO_BUCKET)
+    .list(folder, { search: filename, limit: 1 });
 
   if (error) {
-    console.error("Rate limit check failed; failing open:", error);
+    console.error("Failed to check photo existence:", error);
     return false;
   }
 
-  return (count ?? 0) >= MAX_REPORTS_PER_WINDOW;
-}
-
-/**
- * Records a request attempt for this IP, regardless of whether the report
- * submission itself later succeeds or fails other validation -- this tracks
- * request volume, not successful submissions. Failure here is logged and
- * swallowed; it shouldn't block an otherwise-valid report.
- */
-async function recordRateLimitEvent(
-  supabase: ReturnType<typeof createServerClient>,
-  ipHash: string
-): Promise<void> {
-  const { error } = await supabase.from("rate_limit_events").insert({ ip_hash: ipHash });
-  if (error) {
-    console.error("Failed to record rate limit event:", error);
-  }
+  return (data ?? []).some((file) => file.name === filename);
 }
 
 const DESCRIPTION_MAX_LENGTH = 1000;
@@ -202,6 +154,7 @@ interface ReportInsert {
   address: string | null;
   municipality: string | null;
   province: string | null;
+  photo_url: string | null;
 }
 
 interface ReportRow {
@@ -283,7 +236,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { latitude, longitude, description, severity } =
+  const { latitude, longitude, description, severity, photoPath } =
     body as Record<string, unknown>;
 
   if (
@@ -338,6 +291,30 @@ export async function POST(request: Request) {
     normalizedSeverity = severity;
   }
 
+  // Runs after the rate-limit check (no expensive work on requests that
+  // aren't even allowed) but before the Mapbox geocode call below (no
+  // reason to geocode a request that's about to be rejected for a bad
+  // photo reference).
+  let normalizedPhotoUrl: string | null = null;
+  if (photoPath !== undefined && photoPath !== null) {
+    if (typeof photoPath !== "string" || photoPath === "") {
+      return Response.json(
+        { error: "photoPath must be a non-empty string." },
+        { status: 400 }
+      );
+    }
+
+    const exists = await photoExistsAtPath(supabase, photoPath);
+    if (!exists) {
+      return Response.json(
+        { error: "The referenced photo could not be found. Please try uploading it again." },
+        { status: 400 }
+      );
+    }
+
+    normalizedPhotoUrl = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(photoPath).data.publicUrl;
+  }
+
   try {
     const geocode = await reverseGeocode(latitude, longitude);
 
@@ -349,6 +326,7 @@ export async function POST(request: Request) {
       address: geocode.address,
       municipality: geocode.municipality,
       province: geocode.province,
+      photo_url: normalizedPhotoUrl,
     });
 
     if (error || !data) {
