@@ -160,7 +160,8 @@ export default function ReportPage() {
 
   return (
     <main className="flex flex-1 flex-col items-center gap-4 p-8">
-      <h1 className="text-2xl font-bold">Report a Pothole</h1>
+      <h1 className="text-2xl font-bold">Report a pothole</h1>
+      <p className="text-sm text-gray-600">by anshiwang.com</p>
       <form onSubmit={handleSubmit} className="flex w-full max-w-sm flex-col gap-3">
         <LocationPicker coordinates={coordinates} onChange={setCoordinates} />
         <label className="flex flex-col gap-1">
