@@ -53,3 +53,10 @@ create policy "Public reports are viewable by everyone"
   for select
   to anon
   using (true);
+
+-- Table-level grants. RLS policies only restrict rows an already-granted
+-- role can see; the underlying GRANT is still required. Projects where
+-- Supabase's default privileges already cover new tables won't need this,
+-- but it's included explicitly so this migration is reproducible anywhere.
+grant select on reports to anon;
+grant select, insert, update, delete on reports to service_role;
