@@ -1,27 +1,21 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import LocationPicker, { type Coordinates } from "./location-picker";
 
 const SEVERITY_OPTIONS = ["low", "medium", "high"] as const;
 
 interface ReportResponse {
   public_id: string;
-  latitude: number;
-  longitude: number;
-  address: string | null;
-  municipality: string | null;
-  province: string | null;
-  status: string;
 }
 
 export default function ReportPage() {
+  const router = useRouter();
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [result, setResult] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -31,7 +25,6 @@ export default function ReportPage() {
     }
     setIsSubmitting(true);
     setError(null);
-    setResult(null);
 
     try {
       const response = await fetch("/api/reports", {
@@ -49,13 +42,16 @@ export default function ReportPage() {
 
       if (!response.ok) {
         setError(payload.error ?? "Something went wrong.");
+        setIsSubmitting(false);
         return;
       }
 
-      setResult(payload as ReportResponse);
+      // Deliberately not resetting isSubmitting here: the form is navigating
+      // away, so leaving the button disabled avoids a flash of an
+      // interactive-looking form between the response and the navigation.
+      router.replace(`/report/${(payload as ReportResponse).public_id}?created=1`);
     } catch {
       setError("Network error. Please try again.");
-    } finally {
       setIsSubmitting(false);
     }
   }
@@ -93,15 +89,6 @@ export default function ReportPage() {
           {isSubmitting ? "Submitting..." : "Submit report"}
         </button>
       </form>
-      {result && (
-        <p>
-          Report submitted. Public ID: <strong>{result.public_id}</strong>
-          {" — "}
-          <Link href={`/report/${result.public_id}`} className="underline">
-            View your report
-          </Link>
-        </p>
-      )}
       {error && <p className="text-red-600">{error}</p>}
     </main>
   );

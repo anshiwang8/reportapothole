@@ -41,6 +41,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 export default async function ReportDetailPage(props: PageProps<"/report/[publicId]">) {
   const { publicId } = await props.params;
+  const searchParams = await props.searchParams;
+  const justCreated = searchParams.created === "1";
 
   const supabase = createServerReadClient();
   const { data, error } = await supabase
@@ -67,6 +69,11 @@ export default async function ReportDetailPage(props: PageProps<"/report/[public
     <main className="flex flex-1 flex-col items-center gap-4 p-8">
       <h1 className="text-2xl font-bold">Pothole Report</h1>
       <div className="flex w-full max-w-sm flex-col gap-3">
+        {justCreated && (
+          <p className="border border-green-600 bg-green-50 p-2 text-sm text-green-800">
+            Report submitted successfully — here&apos;s your report.
+          </p>
+        )}
         <p className="text-sm text-gray-600">
           Report ID: <strong>{report.public_id}</strong>
         </p>
