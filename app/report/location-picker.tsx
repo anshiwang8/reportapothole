@@ -127,9 +127,27 @@ function scoreEntry(lowerStreets: string[], terms: string[]): number {
   return score;
 }
 
+/**
+ * Characters a person might type between two street names. "/" matters most:
+ * every dropdown result is rendered with the dataset's verbatim label
+ * ("Yonge St / Sheppard Ave"), so it is both the format people mimic and the
+ * text already sitting in the field after they pick a result -- editing that
+ * text has to re-search cleanly rather than reading as one long street name.
+ *
+ * Character-based only, deliberately: splitting on the word "and" would break
+ * the 275 real street names containing that substring (Sandhurst Crcl,
+ * Midland Ave, Vanderbrent Cres, ...).
+ *
+ * Splits on every separator, not just the first, so a re-edited 3-street
+ * label such as "Dundas St E / Yonge St / Dundas St W" still resolves to its
+ * own entry. Terms map to *distinct* streets (see matchesAllTerms), so extra
+ * terms narrow rather than mismatch.
+ */
+const TERM_SEPARATORS = /[,/&]+/;
+
 function parseTerms(input: string): string[] {
   return input
-    .split(",")
+    .split(TERM_SEPARATORS)
     .map((part) => part.trim().toLowerCase())
     .filter((part) => part !== "");
 }
