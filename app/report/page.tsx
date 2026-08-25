@@ -3,6 +3,7 @@
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@/lib/supabase/client";
+import { stripPhotoMetadata, type ProcessedPhoto } from "@/lib/photo-processing";
 import LocationPicker, { type Coordinates } from "./location-picker";
 
 const SEVERITY_OPTIONS = ["low", "medium", "high"] as const;
@@ -25,20 +26,33 @@ interface UploadUrlResponse {
 // "photo failed to upload" error below. That's expected, not a bug.
 const MAX_PHOTO_PRECHECK_BYTES = 15 * 1024 * 1024;
 
+// The bucket's own file_size_limit (supabase/migrations/0003_photo_storage.sql)
+// -- this is what actually matters for the processed photo, re-checked here
+// because canvas re-encoding (see lib/photo-processing.ts) changes the byte
+// size and can push a file that passed the raw pre-check above over the
+// real limit.
+const MAX_PHOTO_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 export default function ReportPage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Guards against a stale processing result (from a photo the user has
+  // since removed or replaced) landing after a newer selection -- bumped on
+  // every new selection and on remove.
+  const photoSelectionIdRef = useRef(0);
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("");
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function handlePhotoChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] ?? null;
+  async function handlePhotoChange(event: ChangeEvent<HTMLInputElement>) {
+    const inputEl = event.target;
+    const file = inputEl.files?.[0] ?? null;
     setPhotoError(null);
 
     if (!file) {
@@ -47,27 +61,60 @@ export default function ReportPage() {
 
     if (!file.type.startsWith("image/")) {
       setPhotoError("Please select an image file.");
-      event.target.value = "";
+      inputEl.value = "";
       return;
     }
 
     if (file.size > MAX_PHOTO_PRECHECK_BYTES) {
       setPhotoError("That photo is too large. Please choose a smaller one.");
-      event.target.value = "";
+      inputEl.value = "";
       return;
     }
 
-    setPhotoFile(file);
+    const selectionId = ++photoSelectionIdRef.current;
+    setIsProcessingPhoto(true);
+
+    // Redraw onto a canvas and re-export -- this is what actually strips
+    // EXIF (GPS, timestamp, device info); see lib/photo-processing.ts. No
+    // fallback to the raw file on failure: that would silently defeat the
+    // point of this step.
+    let processed: ProcessedPhoto;
+    try {
+      processed = await stripPhotoMetadata(file);
+    } catch {
+      if (selectionId === photoSelectionIdRef.current) {
+        setPhotoError("That photo couldn't be processed. Please try a different one.");
+        setIsProcessingPhoto(false);
+        inputEl.value = "";
+      }
+      return;
+    }
+
+    // A newer selection (or a remove) has already superseded this one.
+    if (selectionId !== photoSelectionIdRef.current) {
+      return;
+    }
+
+    if (processed.blob.size > MAX_PHOTO_UPLOAD_BYTES) {
+      setPhotoError("That photo is too large after processing. Please choose a smaller one.");
+      setIsProcessingPhoto(false);
+      inputEl.value = "";
+      return;
+    }
+
+    setPhotoBlob(processed.blob);
     setPhotoPreviewUrl((previousUrl) => {
       if (previousUrl) {
         URL.revokeObjectURL(previousUrl);
       }
-      return URL.createObjectURL(file);
+      return URL.createObjectURL(processed.blob);
     });
+    setIsProcessingPhoto(false);
   }
 
   function handleRemovePhoto() {
-    setPhotoFile(null);
+    photoSelectionIdRef.current += 1;
+    setPhotoBlob(null);
     setPhotoPreviewUrl((previousUrl) => {
       if (previousUrl) {
         URL.revokeObjectURL(previousUrl);
@@ -75,6 +122,7 @@ export default function ReportPage() {
       return null;
     });
     setPhotoError(null);
+    setIsProcessingPhoto(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -91,11 +139,11 @@ export default function ReportPage() {
     try {
       let photoPath: string | undefined;
 
-      if (photoFile) {
+      if (photoBlob) {
         const uploadUrlResponse = await fetch("/api/photos/upload-url", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contentType: photoFile.type }),
+          body: JSON.stringify({ contentType: photoBlob.type }),
         });
         const uploadUrlPayload = await uploadUrlResponse.json();
 
@@ -115,7 +163,7 @@ export default function ReportPage() {
         const browserClient = createBrowserClient();
         const { error: uploadError } = await browserClient.storage
           .from("report-photos")
-          .uploadToSignedUrl(path, token, photoFile);
+          .uploadToSignedUrl(path, token, photoBlob);
 
         if (uploadError) {
           setError(
@@ -171,9 +219,11 @@ export default function ReportPage() {
             type="file"
             accept="image/*"
             onChange={handlePhotoChange}
+            disabled={isProcessingPhoto}
             className="border p-2"
           />
         </label>
+        {isProcessingPhoto && <p className="text-sm text-gray-600">Processing photo...</p>}
         {photoError && <p className="text-sm text-red-600">{photoError}</p>}
         {photoPreviewUrl && (
           <div className="flex items-center gap-3">
@@ -212,7 +262,11 @@ export default function ReportPage() {
             ))}
           </select>
         </label>
-        <button type="submit" disabled={isSubmitting || !coordinates} className="border p-2">
+        <button
+          type="submit"
+          disabled={isSubmitting || isProcessingPhoto || !coordinates}
+          className="border p-2"
+        >
           {isSubmitting ? "Submitting..." : "Submit report"}
         </button>
       </form>
