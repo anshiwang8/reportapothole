@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServerClient } from "@/lib/supabase/server";
 import { getClientIp, hashIp, isRateLimited, recordRateLimitEvent } from "@/lib/rate-limit";
+import { composeMunicipalEmail } from "@/lib/municipal-email";
 
 const ALLOWED_SEVERITIES = ["low", "medium", "high"] as const;
 type Severity = (typeof ALLOWED_SEVERITIES)[number];
@@ -139,6 +140,12 @@ async function findDuplicateReportId(
 
 const DESCRIPTION_MAX_LENGTH = 1000;
 
+// 320 is the technical maximum length of an email address (RFC 5321). Only
+// a length/type check happens server-side -- actual format validation is
+// client-side only (app/report/page.tsx), per the project's requirements
+// for this optional field.
+const REPORTER_EMAIL_MAX_LENGTH = 320;
+
 const PUBLIC_ID_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const PUBLIC_ID_LENGTH = 8;
@@ -242,6 +249,7 @@ interface ReportInsert {
   province: string | null;
   photo_url: string | null;
   duplicate_of: string | null;
+  reporter_email: string | null;
 }
 
 interface ReportRow {
@@ -252,6 +260,7 @@ interface ReportRow {
   municipality: string | null;
   province: string | null;
   status: string;
+  created_at: string;
 }
 
 /**
@@ -272,7 +281,7 @@ async function insertReportWithRetry(
     const { data, error } = await supabase
       .from("reports")
       .insert({ ...report, public_id })
-      .select("public_id, latitude, longitude, address, municipality, province, status")
+      .select("public_id, latitude, longitude, address, municipality, province, status, created_at")
       .single();
 
     if (!error) {
@@ -323,7 +332,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { latitude, longitude, description, severity, photoPath } =
+  const { latitude, longitude, description, severity, photoPath, reporterEmail } =
     body as Record<string, unknown>;
 
   if (
@@ -378,6 +387,26 @@ export async function POST(request: Request) {
     normalizedSeverity = severity;
   }
 
+  // Format validation is client-side only (app/report/page.tsx) -- server
+  // just guards the type and a sane max length, matching REPORTER_EMAIL_MAX_LENGTH
+  // above.
+  let normalizedReporterEmail: string | null = null;
+  if (reporterEmail !== undefined && reporterEmail !== null && reporterEmail !== "") {
+    if (typeof reporterEmail !== "string") {
+      return Response.json(
+        { error: "reporterEmail must be a string." },
+        { status: 400 }
+      );
+    }
+    if (reporterEmail.length > REPORTER_EMAIL_MAX_LENGTH) {
+      return Response.json(
+        { error: `reporterEmail must be at most ${REPORTER_EMAIL_MAX_LENGTH} characters.` },
+        { status: 400 }
+      );
+    }
+    normalizedReporterEmail = reporterEmail;
+  }
+
   // Runs after the rate-limit check (no expensive work on requests that
   // aren't even allowed) but before the Mapbox geocode call below (no
   // reason to geocode a request that's about to be rejected for a bad
@@ -416,6 +445,7 @@ export async function POST(request: Request) {
       province: geocode.province,
       photo_url: normalizedPhotoUrl,
       duplicate_of: duplicateOfId,
+      reporter_email: normalizedReporterEmail,
     });
 
     if (error || !data) {
@@ -423,6 +453,66 @@ export async function POST(request: Request) {
       return Response.json(
         { error: "Failed to save report. Please try again." },
         { status: 500 }
+      );
+    }
+
+    // Municipal email composition/storage below is best-effort and must
+    // never fail the report submission -- the insert above already
+    // succeeded and is the priority. Any error here is logged and
+    // swallowed, leaving municipal_submission_status at its default (null)
+    // rather than risk a partially-applied status.
+    try {
+      if (duplicateOfId) {
+        // Duplicates are never forwarded to the City -- see
+        // supabase/migrations/0005_municipal_submission.sql.
+        const { error: notSentError } = await supabase
+          .from("reports")
+          .update({ municipal_submission_status: "not_sent" })
+          .eq("public_id", data.public_id);
+
+        if (notSentError) {
+          console.error(
+            `Failed to set not_sent municipal_submission_status for duplicate report ${data.public_id}:`,
+            notSentError
+          );
+        }
+      } else {
+        const composed = composeMunicipalEmail(
+          {
+            publicId: data.public_id,
+            latitude: data.latitude,
+            longitude: data.longitude,
+            address: data.address,
+            municipality: data.municipality,
+            province: data.province,
+            description: normalizedDescription,
+            severity: normalizedSeverity,
+            photoUrl: normalizedPhotoUrl,
+            createdAt: data.created_at,
+          },
+          new URL(request.url).origin
+        );
+
+        const { error: composeUpdateError } = await supabase
+          .from("reports")
+          .update({
+            municipal_email_subject: composed.subject,
+            municipal_email_body: composed.body,
+            municipal_submission_status: "pending",
+          })
+          .eq("public_id", data.public_id);
+
+        if (composeUpdateError) {
+          console.error(
+            `Failed to store composed municipal email for report ${data.public_id}:`,
+            composeUpdateError
+          );
+        }
+      }
+    } catch (municipalError) {
+      console.error(
+        `Failed to prepare municipal submission for report ${data.public_id}; leaving municipal_submission_status unset:`,
+        municipalError
       );
     }
 

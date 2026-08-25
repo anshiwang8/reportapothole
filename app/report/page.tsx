@@ -8,6 +8,11 @@ import LocationPicker, { type Coordinates } from "./location-picker";
 
 const SEVERITY_OPTIONS = ["low", "medium", "high"] as const;
 
+// Client-side-only format check -- the server (app/api/reports/route.ts)
+// deliberately does not validate format, only type/length, per the
+// project's requirements for this optional field.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 interface ReportResponse {
   public_id: string;
 }
@@ -43,6 +48,7 @@ export default function ReportPage() {
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("");
+  const [reporterEmail, setReporterEmail] = useState("");
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
@@ -133,6 +139,10 @@ export default function ReportPage() {
     if (!coordinates) {
       return;
     }
+    if (reporterEmail !== "" && !EMAIL_PATTERN.test(reporterEmail)) {
+      setError("Please enter a valid email address, or leave it blank.");
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
 
@@ -185,6 +195,7 @@ export default function ReportPage() {
           description: description === "" ? undefined : description,
           severity: severity === "" ? undefined : severity,
           photoPath,
+          reporterEmail: reporterEmail === "" ? undefined : reporterEmail,
         }),
       });
 
@@ -261,6 +272,19 @@ export default function ReportPage() {
               </option>
             ))}
           </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          Email (optional)
+          <input
+            type="email"
+            value={reporterEmail}
+            onChange={(event) => setReporterEmail(event.target.value)}
+            placeholder="you@example.com"
+            className="border p-2"
+          />
+          <span className="text-xs text-gray-500">
+            Optional. The City may use this to follow up on your report.
+          </span>
         </label>
         <button
           type="submit"
