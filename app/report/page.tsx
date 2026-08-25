@@ -221,6 +221,7 @@ export default function ReportPage() {
     <main className="flex flex-1 flex-col items-center gap-4 p-8">
       <h1 className="text-2xl font-bold">Report a pothole</h1>
       <p className="text-sm text-gray-600">by anshiwang.com</p>
+      <p className="text-sm text-gray-600">cause my mom was totaled from a pothole</p>
       <form onSubmit={handleSubmit} className="flex w-full max-w-sm flex-col gap-3">
         <LocationPicker coordinates={coordinates} onChange={setCoordinates} />
         <label className="flex flex-col gap-1">
